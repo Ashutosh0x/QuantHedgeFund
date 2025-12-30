@@ -189,12 +189,19 @@ def main():
         st.markdown(f"#### {render_icon('shield')} Risk & Compliance Overview", unsafe_allow_html=True)
         colL, colR = st.columns(2)
         with colL:
+            st.markdown(f'<div style="margin-bottom:1.5rem;">', unsafe_allow_html=True)
             st.progress(0.24, text="Daily Loss Consumption: 24%")
+            st.markdown(f'</div>', unsafe_allow_html=True)
+            
+            st.markdown(f'<div style="margin-bottom:1.5rem;">', unsafe_allow_html=True)
             st.progress(0.69, text="Margin Utilization: 1.38x / 2.0x")
+            st.markdown(f'</div>', unsafe_allow_html=True)
+        
         with colR:
-            st.markdown(f"{render_icon('check-circle', '#00ff88')} Paper Trading Validated")
-            st.markdown(f"{render_icon('check-circle', '#00ff88')} Latency Limits Checked")
-            st.markdown(f"{render_icon('terminal', '#f39c12')} Pre-Trade Gate Enabled")
+            st.markdown(f'<div style="display:flex; align-items:center; margin-bottom:12px;">{render_icon("check-circle", "#00ff88")} Paper Trading Validated</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="display:flex; align-items:center; margin-bottom:12px;">{render_icon("check-circle", "#00ff88")} Latency Limits Checked</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="display:flex; align-items:center; color:#f39c12;">{render_icon("terminal", "#f39c12")} Pre-Trade Gate Enabled</div>', unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
