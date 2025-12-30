@@ -26,26 +26,36 @@ class DuckDBManager:
     - Zero-copy data sharing
     """
     
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, read_only: bool = False, auto_close: bool = False):
         """
         Initialize DuckDB manager.
         
         Args:
             db_path: Path to the DuckDB database file
+            read_only: If True, open connection in read-only mode
+            auto_close: If True, close connection after each query (helper for file locking)
         """
         self.db_path = Path(db_path)
+        self.read_only = read_only
+        self.auto_close = auto_close
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
         
-        # Initialize schema on first connect
-        self.connect()
-        self._init_schema()
-        logger.info(f"DuckDB manager initialized: {self.db_path}")
+        # Initialize schema on first connect (ONLY if writable)
+        if not self.read_only:
+            self.connect()
+            self._init_schema()
+        
+        logger.info(f"DuckDB manager initialized: {self.db_path} (read_only={self.read_only})")
     
     def connect(self) -> duckdb.DuckDBPyConnection:
         """Establish database connection."""
         if self._conn is None:
-            self._conn = duckdb.connect(str(self.db_path))
+            config = {}
+            if self.read_only:
+                config['access_mode'] = 'READ_ONLY'
+                
+            self._conn = duckdb.connect(str(self.db_path), read_only=self.read_only, config=config)
         return self._conn
     
     def close(self) -> None:
@@ -174,12 +184,77 @@ class DuckDBManager:
             )
         """)
         
+        # Strategy Audit Log (Change Governance)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_audit_log (
+                strategy_hash VARCHAR PRIMARY KEY,
+                config_json JSON,
+                regime_snapshot JSON,
+                llm_reasoning TEXT,
+                human_rationale TEXT,
+                approved_by VARCHAR,
+                approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                stage VARCHAR, -- SHADOW, PAPER, CANARY, FULL
+                capital_allocation DOUBLE DEFAULT 0.0,
+                mlflow_run_id VARCHAR,
+                ttl_expiry TIMESTAMP
+            )
+        """)
+        
+        # Strategy Drift Logs (Performance Tracking)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_drift_logs (
+                strategy_hash VARCHAR,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metric_name VARCHAR,
+                expected_value DOUBLE,
+                actual_value DOUBLE,
+                drift_score DOUBLE,
+                status VARCHAR, -- GREEN, YELLOW, RED
+                PRIMARY KEY (strategy_hash, timestamp, metric_name)
+            )
+        """)
+
+        # Trade Execution Log
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                trade_id VARCHAR PRIMARY KEY,
+                strategy_hash VARCHAR,
+                symbol VARCHAR,
+                side VARCHAR,
+                quantity DOUBLE,
+                fill_price DOUBLE,
+                execution_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                commission DOUBLE,
+                slippage_bps DOUBLE,
+                order_type VARCHAR,
+                account_id VARCHAR
+            )
+        """)
+
+        # Real-Time Candle Truth Layer (Broadcasting)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS realtime_candles (
+                symbol VARCHAR,
+                timestamp TIMESTAMP,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE,
+                is_final BOOLEAN,
+                PRIMARY KEY (symbol, timestamp)
+            )
+        """)
+
         # Create indexes
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_symbol ON prices(symbol)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_date ON prices(date)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_income_symbol ON income_statements(symbol)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(execution_time)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_strat ON trades(strategy_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_audit_stage ON strategy_audit_log(stage)")
         
-        logger.info("Database schema initialized")
+        logger.info("Database schema initialized with Governance and Execution logs")
     
     # =====================
     # Query Methods
@@ -196,13 +271,21 @@ class DuckDBManager:
             Polars DataFrame with query results
         """
         conn = self.connect()
-        result = conn.execute(sql).pl()
-        return result
+        try:
+            result = conn.execute(sql).pl()
+            return result
+        finally:
+            if self.auto_close:
+                self.close()
     
     def query_pandas(self, sql: str) -> pd.DataFrame:
         """Execute a SQL query and return results as Pandas DataFrame."""
         conn = self.connect()
-        return conn.execute(sql).df()
+        try:
+            return conn.execute(sql).df()
+        finally:
+            if self.auto_close:
+                self.close()
     
     # =====================
     # Upsert Methods

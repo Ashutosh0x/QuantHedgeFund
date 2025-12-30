@@ -246,14 +246,27 @@ flowchart LR
 | **Retry Logic** | Automatic retry on failures |
 | **Resource Locking** | Prevent concurrent database writes |
 
-### Dashboard
+### Dashboard (Operational Control Plane)
 
 | Feature | Description |
 |---------|-------------|
-| **Live Ops** | Real-time performance metrics and charts |
-| **Research Lab** | Explore symbols and factor rankings |
-| **Signal Charts** | Technical analysis with indicators |
-| **AI Quant Team** | Chat interface for research assistance |
+| **Live Ops** | Real-time performance metrics, live candle charts, and P&L tracking |
+| **Emergency Controls** | Backend-enforced HALT/RESUME trading with persistent state |
+| **Authentication** | Password-protected access (configurable) |
+| **Light/Dark Theme** | Toggle between dark mode and light mode with sun/moon button |
+| **Market Profile** | Volume profile chart with configurable lookback periods |
+| **Governance Audit** | Immutable audit trail for strategy approvals |
+| **Drift Monitoring** | Track strategy performance drift in real-time |
+| **Ops Reporting** | Generate daily operational reports |
+
+### Real-Time Data Feed
+
+| Feature | Description |
+|---------|-------------|
+| **Twelve Data WebSocket** | Free real-time streaming for stocks, forex, and crypto |
+| **Mock Feed** | Simulated data feed for testing without API keys |
+| **Candle Aggregator** | Tick-to-candle conversion with 1-minute bars |
+| **Truth Layer** | Deterministic bar-close synchronization |
 
 ---
 
@@ -418,13 +431,32 @@ This downloads:
 - Fundamental data (optional, takes longer)
 - Creates Zipline bundle
 
-### Step 5: Run Dashboard
+### Step 5: Initialize Database & Run Dashboard
 
 ```bash
-streamlit run dashboard/app.py
+# Initialize the database schema (required first time)
+python scripts/init_db.py
+
+# Start the dashboard
+python scripts/start_dashboard.py
 ```
 
 Open `http://localhost:8501` in your browser.
+
+**Login Credentials:**
+- Password: `quant123` (default, change in `dashboard/app.py` for production)
+
+### Step 5b: Start Real-Time Data Feed (Optional)
+
+For live market data, run ONE of these:
+
+```bash
+# Option A: Twelve Data (Free real-time API)
+python scripts/start_twelvedata_feed.py
+
+# Option B: Mock Feed (For testing without API)
+python scripts/start_mock_feed.py
+```
 
 ### Step 6: Start MLflow (Optional)
 

@@ -4,10 +4,14 @@ Omega - Trading Application
 Main trading application for executing trades via Interactive Brokers.
 """
 
-from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Any
 from loguru import logger
 
 from config.settings import get_settings
+from qsresearch.governance.manager import GovernanceManager
+from omega.data.candle_engine import CandleAggregator, BarCloseEventBus, Tick
+
 
 
 class TradingApp:
@@ -54,6 +58,19 @@ class TradingApp:
         self._ib = None
         self._halted = False  # Critical safety flag
         
+        # Governance & Strategy Layer
+        if not hasattr(self, '_db_manager'):
+            from qsconnect.database.duckdb_manager import DuckDBManager
+            from pathlib import Path
+            self._db_manager = DuckDBManager(Path("data/quant.duckdb"))
+            
+        self.gov = GovernanceManager(self._db_manager)
+        self.active_strategy: Optional[Dict[str, Any]] = None
+
+        # --- Phase 3: Candle Truth Layer ---
+        self.event_bus = BarCloseEventBus()
+        self.aggregators: Dict[str, CandleAggregator] = {}
+        
         # Telemetry & Metrics
         self.metrics = {
             "last_tick_time": None,
@@ -88,8 +105,11 @@ class TradingApp:
                 clientId=self.client_id,
             )
             
+            # Register Global Tick Event
+            self._ib.tickByTickEvent += self._on_tick_by_tick_all
+            
             self._connected = True
-            logger.info("Connected to Interactive Brokers")
+            logger.info("Connected to Interactive Brokers. Tick engine initialized.")
             return True
             
         except ImportError:
@@ -124,6 +144,101 @@ class TradingApp:
     def is_halted(self) -> bool:
         """Check if system is currently halted."""
         return self._halted
+
+    def _on_tick_by_tick_all(self, ticker: Any, tick: Any):
+        """Global handler for raw trade ticks from IBKR."""
+        try:
+            # We ONLY care about TRADE ticks (Last)
+            if not hasattr(tick, 'price') or not hasattr(tick, 'size'):
+                return
+                
+            symbol = ticker.contract.symbol
+            if symbol not in self.aggregators:
+                return
+                
+            # --- Safety: Clock-Skew Detection ---
+            exchange_ts = tick.time.timestamp()
+            recv_ts = datetime.now().timestamp()
+            skew = abs(recv_ts - exchange_ts)
+            
+            from omega.data.candle_engine import MAX_CLOCK_SKEW_SEC
+            if skew > MAX_CLOCK_SKEW_SEC:
+                logger.error(f"CRITICAL CLOCK SKEW for {symbol}: {skew:.2f}s. Halting Truth Layer for safety.")
+                self._halted = True
+                return
+
+            # Convert to our internal Truth Layer format
+            truth_tick = Tick(
+                symbol=symbol,
+                price=float(tick.price),
+                size=float(tick.size),
+                exchange_ts=exchange_ts,
+                recv_ts=recv_ts
+            )
+            
+            self.aggregators[symbol].process_tick(truth_tick)
+            self.metrics["last_tick_time"] = datetime.now()
+            
+        except Exception as e:
+            logger.error(f"Tick Processing Error for {ticker.contract.symbol}: {e}")
+
+    def subscribe_truth_layer(self, symbol: str, interval_sec: int = 60):
+        """Subscribes to raw trade ticks and attaches a deterministic aggregator."""
+        if not self.is_connected():
+            return
+            
+        if symbol in self.aggregators:
+            return
+            
+        contract = self.create_contract(symbol)
+        
+        # Initialize Aggregator with DB support
+        agg = CandleAggregator(
+            symbol=symbol,
+            interval_sec=interval_sec,
+            event_bus=self.event_bus,
+            db_mgr=self._db_manager
+        )
+        self.aggregators[symbol] = agg
+        
+        # Request stream (Last trade only - exact IBKR candle source)
+        self._ib.reqTickByTickData(contract, "Last")
+        logger.info(f"TRUTH LAYER ACTIVE for {symbol} ({interval_sec}s bars)")
+
+    def _log_trade(self, trade: Any):
+        """Log a filled trade to DuckDB for audit."""
+        try:
+            # Extract fill info
+            fill = trade.fills[-1] if trade.fills else None
+            if not fill:
+                return
+
+            strat_hash = self.active_strategy.get("strategy_hash", "UNKNOWN") if self.active_strategy else "MANUAL"
+            
+            conn = self._db_manager.connect()
+            conn.execute("""
+                INSERT INTO trades (
+                    trade_id, strategy_hash, symbol, side, quantity, 
+                    fill_price, execution_time, commission, slippage_bps, 
+                    order_type, account_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                f"{trade.order.orderId}_{int(fill.time.timestamp())}",
+                strat_hash,
+                trade.contract.symbol,
+                trade.order.action,
+                float(fill.execution.shares),
+                float(fill.execution.price),
+                fill.time,
+                float(fill.commissionReport.commission if fill.commissionReport else 0.0),
+                0.0, # Slippage calc placeholder
+                trade.order.orderType,
+                self.client_id
+            ))
+            logger.info(f"Trade LOGGED: {trade.contract.symbol} {trade.order.action} {fill.execution.shares} @ {fill.execution.price}")
+        except Exception as e:
+            logger.error(f"Failed to log trade: {e}")
+
     
     # =====================
     # Account Information
@@ -241,6 +356,31 @@ class TradingApp:
         if self._halted:
             logger.error(f"RISK REJECTED: System is HALTED. Cannot {side} {symbol}.")
             return False
+
+        # --- Governance Check: Staged Deployment & Expiry ---
+        if not self.active_strategy:
+            self.active_strategy = self.gov.get_active_strategy()
+            
+        if not self.active_strategy:
+            logger.warning(f"RISK REJECTED: No active approved strategy found for {symbol}")
+            return False
+            
+        # Check Expiry
+        if datetime.now() > self.active_strategy.get("ttl_expiry", datetime.max):
+            logger.error(f"RISK REJECTED: Strategy {self.active_strategy['strategy_hash'][:8]} has EXPIRED")
+            self._halted = True # Fail safe
+            return False
+            
+        # Deployment Stage Enforcement
+        stage = self.active_strategy.get("stage", "SHADOW")
+        if stage == "SHADOW":
+            logger.info(f"SHADOW MODE: Signal for {side} {shares} {symbol} recorded. Execution suppressed.")
+            return False
+        
+        if stage == "PAPER" and not self.paper_trading:
+            logger.error(f"RISK REJECTED: PAPER strategy cannot run on LIVE account.")
+            return False
+
 
         settings = get_settings()
         portfolio_value = self.get_portfolio_value()
@@ -361,8 +501,15 @@ class TradingApp:
         # Submit order
         trade = self._ib.placeOrder(contract, order)
         
+        # Hook fill event for logging
+        def onFill(trade, fill):
+            self._log_trade(trade)
+            
+        trade.fillEvent += onFill
+        
         # Telemetry
         latency = (time.time() - start_time) * 1000
+
         self.metrics["order_latencies"].append(latency)
         self.metrics["last_order_time"] = datetime.now()
         
@@ -493,6 +640,8 @@ class TradingApp:
             "last_heartbeat": datetime.now().isoformat(),
             "latency_p50_ms": 0.0,
             "latency_p99_ms": 0.0,
+            "truth_layer_active": len(self.aggregators) > 0,
+            "active_symbols": list(self.aggregators.keys())
         }
         
         if self.metrics["order_latencies"]:
@@ -501,6 +650,22 @@ class TradingApp:
             status["latency_p99_ms"] = float(np.percentile(self.metrics["order_latencies"], 99))
             
         return status
+
+    def get_live_candles(self) -> Dict[str, Dict[str, Any]]:
+        """Returns the current forming candle state for all active symbols."""
+        results = {}
+        for symbol, agg in self.aggregators.items():
+            if agg.current_candle:
+                c = agg.current_candle
+                results[symbol] = {
+                    "start_ts": c.start_ts,
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume
+                }
+        return results
 
     def flatten_all_positions(self) -> int:
         """
@@ -513,3 +678,11 @@ class TradingApp:
             self.liquidate_position(pos["symbol"])
             count += 1
         return count
+    def run_blocking(self) -> None:
+        """
+        Run the IB event loop blocking execution.
+        Use this for the main entry point script.
+        """
+        if self.is_connected():
+            logger.info("Starting IB Event Loop...")
+            self._ib.run()
