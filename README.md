@@ -12,7 +12,8 @@
 <p align="center">
  <strong>A complete Python-powered algorithmic trading system for building and running your own quant hedge fund</strong>
 </p>
-<img width="2816" height="1536" alt="Gemini_Generated_Image_ys56n2ys56n2ys56" src="https://github.com/user-attachments/assets/ad292f88-8b84-411a-960f-c30e0f73347c" />
+
+<img width="2816" height="1536" alt="Gemini_Generated_Image_wl6okgwl6okgwl6o" src="https://github.com/user-attachments/assets/b3110e96-2c56-4400-9834-dad1e46e58db" />
 
 
 
@@ -902,4 +903,5 @@ Proprietary - All Rights Reserved
  <a href="https://www.youtube.com/@QuantScience">YouTube</a> •
  <a href="https://quantscience.io">Website</a>
 </p>
+
 
