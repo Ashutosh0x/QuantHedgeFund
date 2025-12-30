@@ -932,14 +932,4 @@ Proprietary - All Rights Reserved
 
 ---
 
-<p align="center">
- <strong>Built by the Quant Science Team</strong>
-</p>
-
-<p align="center">
- <a href="https://github.com/quant-science">GitHub</a> •
- <a href="https://www.youtube.com/@QuantScience">YouTube</a> •
- <a href="https://quantscience.io">Website</a>
-</p>
-
 
