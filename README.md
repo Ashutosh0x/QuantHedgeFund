@@ -200,6 +200,7 @@ flowchart LR
 | **Deadline Awareness** | Filters models that cannot meet the strict nanosecond deadline |
 | **Accuracy Maximization** | Selects the most accurate valid model dynamically |
 | **O(K) Scheduling** | Constant-time decision making for low-latency loops |
+| **Performance** | Benchmarked scheduler overhead of **~84µs** (0.08ms) per decision |
 | **Task Abstraction** | Unified `InferenceTask` interface for all market events |
 
 ### Research Layer (QS Research)
