@@ -76,16 +76,16 @@ The system is divided into **five distinct layers**, each with a specific respon
 
 ```mermaid
 flowchart LR
-    A["FMP API"] --> B["Parquet Cache"]
-    B --> C["DuckDB Database"]
-    C --> D["Zipline Bundle"]
-    
-    B -.-> E["(Raw data)"]
-    C -.-> F["(queryable data)"]
-    D -.-> G["(backtest-ready)"]
-    
-    style A fill:#1f77b4,color:#fff
-    style C fill:#FFF000,color:#000
+ A["FMP API"] --> B["Parquet Cache"]
+ B --> C["DuckDB Database"]
+ C --> D["Zipline Bundle"]
+ 
+ B -.-> E["(Raw data)"]
+ C -.-> F["(queryable data)"]
+ D -.-> G["(backtest-ready)"]
+ 
+ style A fill:#1f77b4,color:#fff
+ style C fill:#FFF000,color:#000
 ```
 
 #### Layer 2: Research Layer (QS Research)
@@ -105,15 +105,15 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A["Raw Data"] --> B["Preprocessing"]
-    B --> C["Factor Calculation"]
-    C --> D["Backtest"]
-    D --> E["Metrics"]
-    C --> F["Stock Rankings"]
-    F --> G["Portfolio Weights"]
-    
-    style A fill:#1f77b4,color:#fff
-    style E fill:#00ff88,color:#000
+ A["Raw Data"] --> B["Preprocessing"]
+ B --> C["Factor Calculation"]
+ C --> D["Backtest"]
+ D --> E["Metrics"]
+ C --> F["Stock Rankings"]
+ F --> G["Portfolio Weights"]
+ 
+ style A fill:#1f77b4,color:#fff
+ style E fill:#00ff88,color:#000
 ```
 
 #### Layer 3: Execution Layer (Omega)
@@ -132,13 +132,13 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    A["Backtest Results"] --> B["Omega Converter"]
-    B --> C["Trading App"]
-    C --> D["Interactive Brokers"]
-    A -.-> E["Target Weights"]
-    D -.-> F["Executed Trades"]
-    
-    style D fill:#CC0000,color:#fff
+ A["Backtest Results"] --> B["Omega Converter"]
+ B --> C["Trading App"]
+ C --> D["Interactive Brokers"]
+ A -.-> E["Target Weights"]
+ D -.-> F["Executed Trades"]
+ 
+ style D fill:#CC0000,color:#fff
 ```
 
 #### Layer 4: Orchestration Layer
@@ -155,13 +155,13 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A["⏰ Scheduler"] --> B["Task 1: Download Data"]
-    B --> C["Task 2: Build Bundle"]
-    C --> D["Task 3: Run Backtest"]
-    D --> E["Task 4: Execute Trades"]
-    
-    style A fill:#024DFD,color:#fff
-    style E fill:#00ff88,color:#000
+ A["⏰ Scheduler"] --> B["Task 1: Download Data"]
+ B --> C["Task 2: Build Bundle"]
+ C --> D["Task 3: Run Backtest"]
+ D --> E["Task 4: Execute Trades"]
+ 
+ style A fill:#024DFD,color:#fff
+ style E fill:#00ff88,color:#000
 ```
 
 #### Layer 5: Monitoring Layer
@@ -207,8 +207,8 @@ Price data is the most important data for any trading strategy. Here's how to do
 from datetime import date
 
 prices = client.bulk_historical_prices(
-    start_date=date(2015, 1, 1),
-    end_date=date.today(),
+ start_date=date(2015, 1, 1),
+ end_date=date.today(),
 )
 ```
 
@@ -233,15 +233,15 @@ Fundamental data includes financial statements that help evaluate company value:
 
 ```python
 client.fetch_bulk_financial_statements(
-    statement_type=[
-        "income-statement",      # Revenue, expenses, profit
-        "balance-sheet-statement", # Assets, liabilities
-        "cash-flow-statement",   # Cash generation
-        "ratios",                # P/E, P/B, ROE, etc.
-    ],
-    periods="all",  # Both annual and quarterly
-    start_year=2000,
-    end_year=2025,
+ statement_type=[
+ "income-statement", # Revenue, expenses, profit
+ "balance-sheet-statement", # Assets, liabilities
+ "cash-flow-statement", # Cash generation
+ "ratios", # P/E, P/B, ROE, etc.
+ ],
+ periods="all", # Both annual and quarterly
+ start_year=2000,
+ end_year=2025,
 )
 ```
 
@@ -265,25 +265,25 @@ All data is stored in DuckDB, a high-performance analytical database. DuckDB is:
 ```sql
 -- Prices table
 CREATE TABLE prices (
-    date DATE,
-    symbol VARCHAR,
-    open DOUBLE,
-    high DOUBLE,
-    low DOUBLE,
-    close DOUBLE,
-    volume BIGINT,
-    adj_close DOUBLE,
-    PRIMARY KEY (date, symbol)
+ date DATE,
+ symbol VARCHAR,
+ open DOUBLE,
+ high DOUBLE,
+ low DOUBLE,
+ close DOUBLE,
+ volume BIGINT,
+ adj_close DOUBLE,
+ PRIMARY KEY (date, symbol)
 );
 
 -- Stock list table
 CREATE TABLE stock_list (
-    symbol VARCHAR PRIMARY KEY,
-    name VARCHAR,
-    exchange VARCHAR,
-    type VARCHAR,
-    sector VARCHAR,
-    industry VARCHAR
+ symbol VARCHAR PRIMARY KEY,
+ name VARCHAR,
+ exchange VARCHAR,
+ type VARCHAR,
+ sector VARCHAR,
+ industry VARCHAR
 );
 ```
 
@@ -292,11 +292,11 @@ CREATE TABLE stock_list (
 ```python
 # Get all Apple data
 df = client.query("""
-    SELECT *
-    FROM prices
-    WHERE symbol = 'AAPL'
-    ORDER BY date DESC
-    LIMIT 100
+ SELECT *
+ FROM prices
+ WHERE symbol = 'AAPL'
+ ORDER BY date DESC
+ LIMIT 100
 """)
 ```
 
@@ -335,20 +335,20 @@ First, we load the historical data from our bundle:
 
 ```python
 def load_data(bundle_name, start_date, end_date):
-    """Load price data from Zipline bundle."""
-    import polars as pl
-    from config.settings import get_settings
-    
-    settings = get_settings()
-    db_manager = DuckDBManager(settings.duckdb_path)
-    
-    prices = db_manager.query_prices(
-        symbols=None,  # All symbols
-        start_date=start_date,
-        end_date=end_date,
-    )
-    
-    return prices
+ """Load price data from Zipline bundle."""
+ import polars as pl
+ from config.settings import get_settings
+ 
+ settings = get_settings()
+ db_manager = DuckDBManager(settings.duckdb_path)
+ 
+ prices = db_manager.query_prices(
+ symbols=None, # All symbols
+ start_date=start_date,
+ end_date=end_date,
+ )
+ 
+ return prices
 ```
 
 ### Step 2: Preprocessing
@@ -360,11 +360,11 @@ Raw data needs cleaning before we can use it. Common preprocessing steps:
 from qsresearch.preprocessors import preprocess_price_data
 
 cleaned_data = preprocess_price_data(
-    raw_data,
-    min_trading_days=504,        # Need 2+ years of data
-    remove_low_trading_days=True, # Remove stocks with gaps
-    remove_large_gaps=True,      # Remove price jumps > 50%
-    remove_low_volume=True,      # Remove illiquid stocks
+ raw_data,
+ min_trading_days=504, # Need 2+ years of data
+ remove_low_trading_days=True, # Remove stocks with gaps
+ remove_large_gaps=True, # Remove price jumps > 50%
+ remove_low_volume=True, # Remove illiquid stocks
 )
 ```
 
@@ -380,12 +380,12 @@ cleaned_data = preprocess_price_data(
 from qsresearch.preprocessors import universe_screener
 
 filtered_data = universe_screener(
-    cleaned_data,
-    lookback_days=730,     # 2 year lookback
-    volume_top_n=500,      # Top 500 by volume
-    min_avg_volume=100000, # At least 100k shares/day
-    min_avg_price=4.0,     # At least $4 average price
-    max_volatility=0.25,   # Less than 25% annual volatility
+ cleaned_data,
+ lookback_days=730, # 2 year lookback
+ volume_top_n=500, # Top 500 by volume
+ min_avg_volume=100000, # At least 100k shares/day
+ min_avg_price=4.0, # At least $4 average price
+ max_volatility=0.25, # Less than 25% annual volatility
 )
 ```
 
@@ -402,10 +402,10 @@ A **factor** is a quantitative signal that predicts future returns. The QSMOM (Q
 from qsresearch.features.momentum import add_qsmom_features
 
 data_with_factors = add_qsmom_features(
-    filtered_data,
-    fast_period=21,      # 1 month
-    slow_period=252,     # 1 year
-    signal_period=126,   # 6 months
+ filtered_data,
+ fast_period=21, # 1 month
+ slow_period=252, # 1 year
+ signal_period=126, # 6 months
 )
 ```
 
@@ -424,8 +424,8 @@ QSMOM = ROC(slow_period) - ROC(fast_period)
 
 ```
 ROC(252) = (100 - 80) / 80 = 0.25 (25%)
-ROC(21)  = (100 - 98) / 98 = 0.02 (2%)
-QSMOM    = 0.25 - 0.02 = 0.23 (23%)
+ROC(21) = (100 - 98) / 98 = 0.02 (2%)
+QSMOM = 0.25 - 0.02 = 0.23 (23%)
 ```
 
 **Why this works:**
@@ -441,21 +441,21 @@ The backtest simulates trading the strategy:
 from qsresearch.backtest import run_backtest
 
 config = {
-    "experiment_name": "Momentum Strategy",
-    "bundle_name": "historical_prices_fmp",
-    "start_date": "2015-01-01",
-    "end_date": "2024-12-31",
-    "capital_base": 1_000_000,
-    
-    "algorithm": {
-        "callable": "use_factor_as_signal",
-        "params": {"top_n": 20}
-    },
-    
-    "portfolio_strategy": {
-        "func": "long_short_equal_weight_portfolio",
-        "params": {"num_long_positions": 20}
-    }
+ "experiment_name": "Momentum Strategy",
+ "bundle_name": "historical_prices_fmp",
+ "start_date": "2015-01-01",
+ "end_date": "2024-12-31",
+ "capital_base": 1_000_000,
+ 
+ "algorithm": {
+ "callable": "use_factor_as_signal",
+ "params": {"top_n": 20}
+ },
+ 
+ "portfolio_strategy": {
+ "func": "long_short_equal_weight_portfolio",
+ "params": {"num_long_positions": 20}
+ }
 }
 
 results = run_backtest(config, log_to_mlflow=True)
@@ -465,12 +465,12 @@ results = run_backtest(config, log_to_mlflow=True)
 
 1. **Day 1:** Start with $1,000,000 cash
 2. **Each day:**
-   - Calculate factor values for all stocks
-   - Rank stocks by factor
-   - Select top 20 stocks
-   - Calculate target weights (5% each)
-   - Place orders to rebalance
-   - Track P&L
+ - Calculate factor values for all stocks
+ - Rank stocks by factor
+ - Select top 20 stocks
+ - Calculate target weights (5% each)
+ - Place orders to rebalance
+ - Track P&L
 3. **End:** Calculate final portfolio value and statistics
 
 ### Step 5: Performance Metrics
@@ -481,8 +481,8 @@ After the backtest, we calculate 88+ metrics:
 from qsresearch.portfolio_analysis import calculate_all_metrics
 
 metrics = calculate_all_metrics(
-    performance_df=results["performance"],
-    benchmark_returns=spy_returns,
+ performance_df=results["performance"],
+ benchmark_returns=spy_returns,
 )
 ```
 
@@ -527,10 +527,10 @@ from omega import TradingApp
 
 # Connect to paper trading (port 7497)
 app = TradingApp(
-    host="127.0.0.1",
-    port=7497,
-    client_id=1,
-    paper_trading=True
+ host="127.0.0.1",
+ port=7497,
+ client_id=1,
+ paper_trading=True
 )
 
 # Establish connection
@@ -545,12 +545,12 @@ Before placing orders, we need to know what we already own:
 positions = app.get_positions()
 
 for pos in positions:
-    print(f"""
-    Symbol: {pos['symbol']}
-    Quantity: {pos['quantity']} shares
-    Avg Cost: ${pos['avg_cost']:.2f}
-    Market Value: ${pos['market_value']:,.2f}
-    """)
+ print(f"""
+ Symbol: {pos['symbol']}
+ Quantity: {pos['quantity']} shares
+ Avg Cost: ${pos['avg_cost']:.2f}
+ Market Value: ${pos['market_value']:,.2f}
+ """)
 ```
 
 ### Step 3: The order_target_percent Method
@@ -581,10 +581,10 @@ from omega.utils.omega_trades_converter import omega_trades_from_zipline
 
 # Get target positions from backtest
 target_positions = [
-    {"symbol": "AAPL", "weight": 0.05},
-    {"symbol": "MSFT", "weight": 0.05},
-    {"symbol": "GOOGL", "weight": 0.05},
-    # ... 17 more positions
+ {"symbol": "AAPL", "weight": 0.05},
+ {"symbol": "MSFT", "weight": 0.05},
+ {"symbol": "GOOGL", "weight": 0.05},
+ # ... 17 more positions
 ]
 
 # Get current positions from broker
@@ -592,16 +592,16 @@ current_positions = app.get_positions()
 
 # Execute rebalancing
 for target in target_positions:
-    app.order_target_percent(
-        symbol=target["symbol"],
-        target_percent=target["weight"]
-    )
+ app.order_target_percent(
+ symbol=target["symbol"],
+ target_percent=target["weight"]
+ )
 
 # Liquidate positions no longer in target
 target_symbols = {t["symbol"] for t in target_positions}
 for current in current_positions:
-    if current["symbol"] not in target_symbols:
-        app.liquidate_position(current["symbol"])
+ if current["symbol"] not in target_symbols:
+ app.liquidate_position(current["symbol"])
 ```
 
 ### Step 5: Overnight Order Execution
@@ -651,45 +651,45 @@ Luigi is a Python library originally built by Spotify for workflow management.
 
 ```python
 class DownloadPricesFMP(luigi.Task):
-    """Download historical price data."""
-    
-    start_date = luigi.DateParameter()
-    run_date = luigi.DateParameter()
-    
-    def requires(self):
-        return None  # No dependencies
-    
-    def output(self):
-        return luigi.LocalTarget(f"cache/prices_{self.run_date}.done")
-    
-    def run(self):
-        client = Client()
-        client.bulk_historical_prices(self.start_date, self.run_date)
-        Path(self.output().path).touch()
+ """Download historical price data."""
+ 
+ start_date = luigi.DateParameter()
+ run_date = luigi.DateParameter()
+ 
+ def requires(self):
+ return None # No dependencies
+ 
+ def output(self):
+ return luigi.LocalTarget(f"cache/prices_{self.run_date}.done")
+ 
+ def run(self):
+ client = Client()
+ client.bulk_historical_prices(self.start_date, self.run_date)
+ Path(self.output().path).touch()
 
 
 class RunBacktest(luigi.Task):
-    """Run the trading strategy backtest."""
-    
-    def requires(self):
-        return BuildZiplineBundle(...)  # Must build bundle first
-    
-    def run(self):
-        run_backtest(CONFIG)
+ """Run the trading strategy backtest."""
+ 
+ def requires(self):
+ return BuildZiplineBundle(...) # Must build bundle first
+ 
+ def run(self):
+ run_backtest(CONFIG)
 ```
 
 **Dependency graph:**
 
 ```mermaid
 flowchart LR
-    A["DownloadPricesFMP"] --> C["BuildZiplineBundle"]
-    B["DownloadFundamentals"] --> C
-    C --> D["RunBacktest"]
-    D --> E["ExecuteTrades"]
-    
-    style A fill:#1f77b4,color:#fff
-    style B fill:#1f77b4,color:#fff
-    style E fill:#00ff88,color:#000
+ A["DownloadPricesFMP"] --> C["BuildZiplineBundle"]
+ B["DownloadFundamentals"] --> C
+ C --> D["RunBacktest"]
+ D --> E["ExecuteTrades"]
+ 
+ style A fill:#1f77b4,color:#fff
+ style B fill:#1f77b4,color:#fff
+ style E fill:#00ff88,color:#000
 ```
 
 **Running Luigi:**
@@ -697,12 +697,12 @@ flowchart LR
 ```bash
 # With local scheduler (development)
 python -m workflow.dags.01_ingest_data ExecuteTrades \
-    --start-date 2015-01-01 \
-    --run-date 2025-12-30 \
-    --local-scheduler
+ --start-date 2015-01-01 \
+ --run-date 2025-12-30 \
+ --local-scheduler
 
 # With central scheduler (production)
-luigid --port 8082  # Start scheduler
+luigid --port 8082 # Start scheduler
 python -m workflow.dags.01_ingest_data ExecuteTrades ...
 ```
 
@@ -719,28 +719,28 @@ Prefect is a modern workflow orchestration platform with:
 ```python
 @flow(name="nightly-pipeline-orchestrator")
 def nightly_orchestrator_flow():
-    """Master flow that runs all nightly jobs."""
-    
-    run_date = date.today()
-    
-    # Step 1: Refresh database
-    refresh_result = refresh_database(run_date)
-    
-    # Step 2: Run parameter sweep
-    sweep_result = run_parameter_sweep(run_date)
-    
-    # Step 3: Run production backtest
-    backtest_result = run_nightly_backtest(run_date)
-    
-    # Step 4: Update dashboard
-    dashboard_result = generate_dashboard_snapshot(run_date)
-    
-    return {
-        "refresh": refresh_result,
-        "sweep": sweep_result,
-        "backtest": backtest_result,
-        "dashboard": dashboard_result,
-    }
+ """Master flow that runs all nightly jobs."""
+ 
+ run_date = date.today()
+ 
+ # Step 1: Refresh database
+ refresh_result = refresh_database(run_date)
+ 
+ # Step 2: Run parameter sweep
+ sweep_result = run_parameter_sweep(run_date)
+ 
+ # Step 3: Run production backtest
+ backtest_result = run_nightly_backtest(run_date)
+ 
+ # Step 4: Update dashboard
+ dashboard_result = generate_dashboard_snapshot(run_date)
+ 
+ return {
+ "refresh": refresh_result,
+ "sweep": sweep_result,
+ "backtest": backtest_result,
+ "dashboard": dashboard_result,
+ }
 ```
 
 **Scheduling:**
@@ -750,9 +750,9 @@ def nightly_orchestrator_flow():
 schedule = CronSchedule(cron="0 1 * * 2-6")
 
 Deployment.build_from_flow(
-    flow=nightly_orchestrator_flow,
-    name="nightly-pipeline",
-    schedule=schedule,
+ flow=nightly_orchestrator_flow,
+ name="nightly-pipeline",
+ schedule=schedule,
 ).apply()
 ```
 
@@ -824,11 +824,11 @@ Here's exactly what happens every trading day:
 ```
 1. Prefect triggers nightly-pipeline-orchestrator
 2. Runs all dependent tasks in sequence:
-   a. Verify data freshness
-   b. Build/update Zipline bundle
-   c. Run production backtest
-   d. Run parameter sweep (research)
-   e. Generate dashboard snapshot
+ a. Verify data freshness
+ b. Build/update Zipline bundle
+ c. Run production backtest
+ d. Run parameter sweep (research)
+ e. Generate dashboard snapshot
 3. Log all results to MLflow
 ```
 
@@ -1020,11 +1020,11 @@ Test many parameter combinations automatically:
 
 ```python
 sweep_config = {
-    "param_grid": {
-        "fast_period": [21, 42, 63],
-        "slow_period": [126, 252, 504],
-        "top_n": [10, 20, 30, 40],
-    }
+ "param_grid": {
+ "fast_period": [21, 42, 63],
+ "slow_period": [126, 252, 504],
+ "top_n": [10, 20, 30, 40],
+ }
 }
 
 # This tests 3 × 3 × 4 = 36 combinations
@@ -1037,9 +1037,9 @@ Combine multiple factors for potentially better results:
 
 ```python
 factors = [
-    ("momentum", 0.4),  # 40% weight
-    ("value", 0.3),     # 30% weight
-    ("quality", 0.3),   # 30% weight
+ ("momentum", 0.4), # 40% weight
+ ("value", 0.3), # 30% weight
+ ("quality", 0.3), # 30% weight
 ]
 
 composite_score = sum(factor_value * weight for factor_value, weight in factors)
@@ -1051,9 +1051,9 @@ Real trading has costs. Account for them in backtests:
 
 ```python
 config = {
-    "transaction_cost": 0.001,  # 0.1% per trade
-    "slippage": 0.0005,         # 0.05% slippage
-    "management_fee": 0.02,     # 2% annual
+ "transaction_cost": 0.001, # 0.1% per trade
+ "slippage": 0.0005, # 0.05% slippage
+ "management_fee": 0.02, # 2% annual
 }
 ```
 
@@ -1063,10 +1063,10 @@ Add stop-losses and position limits:
 
 ```python
 config = {
-    "stop_loss_enabled": True,
-    "stop_loss_pct": 0.15,      # Sell if down 15%
-    "max_position_size": 0.10,  # Max 10% in any stock
-    "max_sector_exposure": 0.30, # Max 30% in any sector
+ "stop_loss_enabled": True,
+ "stop_loss_pct": 0.15, # Sell if down 15%
+ "max_position_size": 0.10, # Max 10% in any stock
+ "max_sector_exposure": 0.30, # Max 30% in any sector
 }
 ```
 
