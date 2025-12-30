@@ -17,6 +17,10 @@
 
 
 
+https://github.com/user-attachments/assets/0a2bbe6c-188f-41e2-9080-8c016b3c9743
+
+
+
 ---
 
 ## Table of Contents
@@ -931,5 +935,6 @@ Algorithmic trading involves substantial risk of loss. You could lose some or al
 Proprietary - All Rights Reserved
 
 ---
+
 
 
