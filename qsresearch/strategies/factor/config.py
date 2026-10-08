@@ -45,8 +45,13 @@ MOMENTUM_FACTOR_CONFIG = {
                 "momentum_top_n": None,
                 "percent_change_filter": False,
                 "max_percent_change": 0.35,
-                "volatility_filter": True,
+                # Relative cap: drop the most volatile 20% of names on each date.
+                # An absolute cap (volatility_filter=True, max_volatility=0.25)
+                # empties the universe when volatility rises market-wide (6-14
+                # of 50 large caps were eligible in 2020-2022).
+                "volatility_filter": False,
                 "max_volatility": 0.25,
+                "max_volatility_percentile": 0.8,
                 "min_avg_volume": 100000,
                 "min_avg_price": 4.0,
                 "min_last_price": 5.0,
@@ -92,6 +97,7 @@ MOMENTUM_FACTOR_CONFIG = {
             "factor_column": "close_qsmom_21_252_126",
             "top_n": 20,
             "threshold": None,
+            "weighting": "slot",  # 1/top_n per pick; unfilled slots stay in cash
         },
     },
     

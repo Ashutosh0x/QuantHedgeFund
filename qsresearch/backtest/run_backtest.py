@@ -23,6 +23,16 @@ from config.settings import get_settings
 from qsresearch.portfolio_analysis.performance_metrics import calculate_all_metrics
 
 
+SIMULATOR_VERSION = "signal_weights_v2"
+DEFAULT_REBALANCE_FREQUENCY = "M"
+DEFAULT_TRANSACTION_COST_BPS = 5.0
+REBALANCE_FREQUENCIES = {"D", "W", "M", "Q"}
+
+
+class BacktestDataError(ValueError):
+    """Raised when a backtest has no usable price or signal data."""
+
+
 def run_backtest(
     config: Dict[str, Any],
     output_dir: Optional[Path] = None,
@@ -47,6 +57,12 @@ def run_backtest(
             - preprocessing: List of preprocessing steps
             - algorithm: Algorithm function and params
             - portfolio_strategy: Portfolio construction config
+            - simulation: Optional simulator settings
+                - rebalance_frequency: 'D', 'W', 'M' (default) or 'Q'
+                - transaction_cost_bps: cost per unit of turnover (default 5)
+                - warmup_days: trading days of history loaded before
+                  start_date so factors and point-in-time history rules
+                  are ready on day one (default: see _infer_warmup_days)
         output_dir: Directory to save results
         log_to_mlflow: Whether to log to MLflow
         
@@ -67,7 +83,16 @@ def run_backtest(
     start_date = config.get("start_date", "2015-01-01")
     end_date = config.get("end_date", datetime.now().strftime("%Y-%m-%d"))
     capital_base = config.get("capital_base", 1_000_000)
-    
+    simulation_config = {
+        "rebalance_frequency": DEFAULT_REBALANCE_FREQUENCY,
+        "transaction_cost_bps": DEFAULT_TRANSACTION_COST_BPS,
+        **config.get("simulation", {}),
+    }
+    warmup_days = simulation_config.get("warmup_days")
+    if warmup_days is None:
+        warmup_days = _infer_warmup_days(config.get("factors", []), config.get("preprocessing", []))
+    data_start_date = _warmup_start_date(start_date, warmup_days)
+
     # MLflow setup
     if log_to_mlflow and MLFLOW_AVAILABLE:
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
@@ -83,11 +108,26 @@ def run_backtest(
         # Log parameters
         _log_params_to_mlflow(config)
     
+        # Tag the simulator so runs logged by the old universe-average/random
+        # fallback simulator can be told apart from signal-weighted runs
+        mlflow.set_tags({
+            "simulator": SIMULATOR_VERSION,
+            "sim.rebalance_frequency": simulation_config["rebalance_frequency"],
+            "sim.transaction_cost_bps": simulation_config["transaction_cost_bps"],
+            "sim.warmup_days": warmup_days,
+            "sim.data_start_date": data_start_date,
+        })
+
     try:
-        # Step 1: Load data
-        logger.info("Loading price data...")
-        price_data = _load_price_data(bundle_name, start_date, end_date)
-        
+        # Step 1: Load data, including the warm-up history before start_date.
+        # Factors are computed over all of it; the simulation starts at start_date.
+        logger.info(
+            f"Loading price data from {data_start_date} "
+            f"({warmup_days} trading days of warm-up before {start_date})..."
+        )
+        price_data = _load_price_data(bundle_name, data_start_date, end_date)
+        _check_warmup_coverage(price_data, start_date, warmup_days)
+
         # Step 2: Apply preprocessing
         logger.info("Applying preprocessing steps...")
         processed_data = _apply_preprocessing(price_data, config.get("preprocessing", []))
@@ -105,8 +145,9 @@ def run_backtest(
             start_date,
             end_date,
             capital_base,
+            simulation_config,
         )
-        
+
         # Step 5: Calculate metrics
         logger.info("Calculating performance metrics...")
         metrics = calculate_all_metrics(performance)
@@ -116,6 +157,8 @@ def run_backtest(
             "performance": performance,
             "metrics": metrics,
             "config": config,
+            "data_start_date": data_start_date,
+            "warmup_days": warmup_days,
             "run_date": datetime.now().isoformat(),
         }
         
@@ -147,6 +190,68 @@ def run_backtest(
             mlflow.end_run()
 
 
+def _infer_warmup_days(factors_config: list, preprocessing_config: Optional[list] = None) -> int:
+    """
+    Trading days of history needed before start_date so the strategy can trade on day one.
+
+    Uses the longest backward-looking lookback among factor params: integer
+    params named '*_period' or '*_window', and lists named '*_periods' or
+    '*_windows'. Forward-looking params (names starting with 'forward') are
+    skipped. A pct_change(period) has its first value once `period` bars
+    precede the current one, so `period` days of history are enough.
+
+    Point-in-time preprocessing also needs history: price_preprocessor only
+    flags a symbol tradable after min_trading_days, and universe_screener
+    after min_history_days.
+    """
+    longest = 0
+    for step in preprocessing_config or []:
+        params = step.get("params", {})
+        if not params.get("point_in_time", True):
+            continue
+        if step.get("name") == "price_preprocessor" and params.get("remove_low_trading_days", True):
+            longest = max(longest, params.get("min_trading_days", 504))
+        elif step.get("name") == "universe_screener":
+            longest = max(longest, params.get("min_history_days", 21))
+    for factor_spec in factors_config:
+        for key, value in factor_spec.get("params", {}).items():
+            if key.startswith("forward"):
+                continue
+            if key.endswith(("_period", "_window")) and isinstance(value, int):
+                longest = max(longest, value)
+            elif key.endswith(("_periods", "_windows")) and isinstance(value, (list, tuple)):
+                longest = max([longest, *(v for v in value if isinstance(v, int))])
+    return longest
+
+
+def _warmup_start_date(start_date: str, warmup_days: int) -> str:
+    """
+    Calendar date to start loading data so warmup_days trading days precede start_date.
+
+    Steps back in business days with a 5% + 5 day margin for exchange holidays;
+    loading a few extra days is harmless, loading too few delays the first trade.
+    """
+    if warmup_days < 0:
+        raise ValueError(f"warmup_days must be >= 0, got {warmup_days}")
+    if warmup_days == 0:
+        return start_date
+    business_days = int(warmup_days * 1.05) + 5
+    data_start = pd.Timestamp(start_date) - pd.offsets.BDay(business_days)
+    return data_start.strftime("%Y-%m-%d")
+
+
+def _check_warmup_coverage(prices: pd.DataFrame, start_date: str, warmup_days: int) -> None:
+    """Warn when the database holds fewer trading days before start_date than the warm-up needs."""
+    dates = pd.to_datetime(prices["date"])
+    available = dates[dates < pd.Timestamp(start_date)].nunique()
+    if available < warmup_days:
+        logger.warning(
+            f"Only {available} trading days of history before {start_date} (warm-up needs "
+            f"{warmup_days}, data starts {dates.min().date()}); factors will not be ready "
+            f"on day one and the portfolio holds cash until they are"
+        )
+
+
 def _load_price_data(
     bundle_name: str,
     start_date: str,
@@ -162,6 +267,12 @@ def _load_price_data(
         start_date=start_date,
         end_date=end_date,
     )
+    
+    if prices.is_empty():
+        raise BacktestDataError(
+            f"No price data between {start_date} and {end_date} in "
+            f"{get_settings().duckdb_path}; ingest prices before running a backtest"
+        )
     
     return prices.to_pandas()
 
@@ -198,15 +309,30 @@ def _apply_factors(
     from qsresearch.features import FactorEngine
     
     engine = FactorEngine()
-    
+
     for factor_spec in factors_config:
         name = factor_spec.get("name")
         params = factor_spec.get("params", {})
-        
-        if name:
+        func_path = factor_spec.get("func")
+
+        if name and name not in engine.BUILTIN_FACTORS and func_path:
+            # Configs name the function as "module.path:function"
+            df = _import_qsresearch_callable(func_path)(df, **params)
+            logger.info(f"Applied factor: {name} ({func_path})")
+        elif name:
             df = engine.calculate_factor(df, name, **params)
-    
+
     return df
+
+
+def _import_qsresearch_callable(func_path: str) -> Callable:
+    """Resolve a "qsresearch.module:function" path from a config."""
+    import importlib
+
+    module_path, _, func_name = func_path.partition(":")
+    if not func_name or not module_path.startswith("qsresearch."):
+        raise ValueError(f"Expected 'qsresearch.<module>:<function>', got {func_path!r}")
+    return getattr(importlib.import_module(module_path), func_name)
 
 
 def _run_algorithm(
@@ -215,6 +341,7 @@ def _run_algorithm(
     start_date: str,
     end_date: str,
     capital_base: float,
+    simulation_config: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """
     Run the trading algorithm.
@@ -224,6 +351,8 @@ def _run_algorithm(
     from qsresearch.strategies.factor import algorithms as algo_module
     
     algorithm_name = algorithm_config.get("callable", "use_factor_as_signal")
+    # Configs give "module.path:function"; the function is looked up in algo_module
+    algorithm_name = algorithm_name.rsplit(":", 1)[-1]
     params = algorithm_config.get("params", {})
     
     # Dynamically get the algorithm function
@@ -237,7 +366,16 @@ def _run_algorithm(
     signals = algorithm_func(df, **params)
     
     # Simulate portfolio performance
-    performance = _simulate_portfolio(signals, df, capital_base, start_date, end_date)
+    simulation_config = simulation_config or {}
+    performance = _simulate_portfolio(
+        signals,
+        df,
+        capital_base,
+        start_date,
+        end_date,
+        rebalance_frequency=simulation_config.get("rebalance_frequency", DEFAULT_REBALANCE_FREQUENCY),
+        transaction_cost_bps=simulation_config.get("transaction_cost_bps", DEFAULT_TRANSACTION_COST_BPS),
+    )
     
     return performance
 
@@ -248,85 +386,149 @@ def _simulate_portfolio(
     capital_base: float,
     start_date: str,
     end_date: str,
+    rebalance_frequency: str = DEFAULT_REBALANCE_FREQUENCY,
+    transaction_cost_bps: float = DEFAULT_TRANSACTION_COST_BPS,
 ) -> pd.DataFrame:
     """
-    Simulate portfolio performance based on signals.
+    Simulate a portfolio that holds the signal weights.
     
-    This is a simplified but realistic simulation that:
-    1. Uses actual price returns from the data
-    2. Weights returns by signal strength
-    3. Applies transaction costs
+    On each rebalance date (the first signal date of each period) the book is
+    traded at that day's close to the signal weights for that date, so those
+    weights earn the NEXT day's returns - no look-ahead. Between rebalances the
+    positions drift with prices. Weights that sum to less than 1 leave the
+    remainder in cash at zero return.
+    
+    Transaction costs are charged on each rebalance as
+    turnover * transaction_cost_bps / 10,000, where turnover is the sum of
+    |target weight - drifted weight| across symbols.
+    
+    Args:
+        signals: Long-format frame with 'date', 'symbol' and 'weight' columns
+        prices: Long-format frame with 'date', 'symbol' and 'close' columns
+        capital_base: Starting portfolio value
+        start_date: First date of the simulation window
+        end_date: Last date of the simulation window
+        rebalance_frequency: 'D' (every signal date), 'W', 'M' or 'Q'
+        transaction_cost_bps: Cost per unit of turnover, in basis points
+    
+    Returns:
+        DataFrame with date, portfolio_value, returns, turnover and
+        transaction_cost (as a fraction of portfolio value) per trading day
+    
+    Raises:
+        BacktestDataError: If prices or signals are missing or empty
     """
     import numpy as np
-    
-    # Ensure we have required columns
-    if 'date' not in prices.columns or 'close' not in prices.columns:
-        logger.warning("Price data missing required columns, using fallback simulation")
-        return _fallback_simulation(capital_base, start_date, end_date)
-    
-    try:
-        # Calculate daily returns from price data
-        prices_sorted = prices.sort_values(['symbol', 'date'])
-        prices_sorted['daily_return'] = prices_sorted.groupby('symbol')['close'].pct_change()
-        
-        # Get average market return per day (equal-weighted across all stocks)
-        daily_returns = prices_sorted.groupby('date')['daily_return'].mean()
-        
-        # Filter to date range
-        daily_returns = daily_returns.loc[start_date:end_date].dropna()
-        
-        if len(daily_returns) == 0:
-            logger.warning("No returns data available, using fallback simulation")
-            return _fallback_simulation(capital_base, start_date, end_date)
-        
-        # Apply transaction cost (0.1% per month, roughly)
-        transaction_cost = 0.001 / 21  # Daily transaction cost
-        adjusted_returns = daily_returns - transaction_cost
-        
-        # Calculate cumulative portfolio value
-        portfolio_values = [capital_base]
-        for ret in adjusted_returns:
-            new_value = portfolio_values[-1] * (1 + ret)
-            portfolio_values.append(new_value)
-        
-        # Build performance DataFrame
-        dates = list(daily_returns.index)
-        performance = pd.DataFrame({
-            "date": [pd.Timestamp(start_date)] + dates,
-            "portfolio_value": portfolio_values[:len(dates) + 1],
-            "returns": [0.0] + list(adjusted_returns),
-        })
-        
-        return performance
-        
-    except Exception as e:
-        logger.warning(f"Simulation error: {e}, using fallback")
-        return _fallback_simulation(capital_base, start_date, end_date)
 
+    if rebalance_frequency not in REBALANCE_FREQUENCIES:
+        raise ValueError(
+            f"rebalance_frequency must be one of {sorted(REBALANCE_FREQUENCIES)}, "
+            f"got {rebalance_frequency!r}"
+        )
+    if transaction_cost_bps < 0:
+        raise ValueError(f"transaction_cost_bps must be >= 0, got {transaction_cost_bps}")
 
-def _fallback_simulation(capital_base: float, start_date: str, end_date: str) -> pd.DataFrame:
-    """Fallback simulation when real data is unavailable."""
-    import numpy as np
+    if prices is None or prices.empty:
+        raise BacktestDataError("Price data is empty; cannot simulate a portfolio")
+    missing = {"date", "symbol", "close"} - set(prices.columns)
+    if missing:
+        raise BacktestDataError(f"Price data is missing required columns: {sorted(missing)}")
+    if signals is None or signals.empty:
+        raise BacktestDataError("Signals are empty; the algorithm selected no positions")
+    missing = {"date", "symbol", "weight"} - set(signals.columns)
+    if missing:
+        raise BacktestDataError(f"Signals are missing required columns: {sorted(missing)}")
     
-    dates = pd.date_range(start=start_date, end=end_date, freq="B")
+    # Wide close matrix (dates x symbols). Closes are forward-filled so a missing
+    # bar is a zero return and the next bar carries the full move.
+    px = prices[["date", "symbol", "close"]].copy()
+    px["date"] = pd.to_datetime(px["date"])
+    px = px.drop_duplicates(["date", "symbol"], keep="last")
+    close = px.pivot(index="date", columns="symbol", values="close").sort_index().ffill()
+    asset_returns = close.pct_change(fill_method=None).fillna(0.0)
     
-    # Generate realistic random returns (mean ~10% annual, ~15% volatility)
-    np.random.seed(42)  # Reproducible for testing
-    daily_mean = 0.10 / 252  # 10% annual return
-    daily_std = 0.15 / np.sqrt(252)  # 15% annual volatility
+    start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    asset_returns = asset_returns.loc[start:end]
+    if asset_returns.empty:
+        raise BacktestDataError(f"No price data between {start_date} and {end_date}")
     
-    returns = np.random.normal(daily_mean, daily_std, len(dates))
-    returns[0] = 0  # First day has no return
+    # Wide target-weight matrix on signal dates; symbols absent from a date get 0
+    sig = signals[["date", "symbol", "weight"]].copy()
+    sig["date"] = pd.to_datetime(sig["date"])
+    sig = sig.drop_duplicates(["date", "symbol"], keep="last")
+    unknown = set(sig["symbol"]) - set(close.columns)
+    if unknown:
+        logger.warning(f"Dropping signals for {len(unknown)} symbols with no prices")
+        sig = sig[sig["symbol"].isin(close.columns)]
+    targets = (
+        sig.pivot(index="date", columns="symbol", values="weight")
+        .reindex(columns=close.columns)
+        .fillna(0.0)
+    )
+    targets = targets[targets.index.isin(asset_returns.index)]
+    if targets.empty:
+        raise BacktestDataError(
+            f"No signals fall on trading dates between {start_date} and {end_date}"
+        )
     
-    portfolio_values = capital_base * np.cumprod(1 + returns)
+    # Rebalance on the first signal date of each period
+    if rebalance_frequency == "D":
+        rebalance_dates = targets.index
+    else:
+        periods = targets.index.to_period(rebalance_frequency)
+        rebalance_dates = targets.index[~periods.duplicated()]
+    rebalance_set = set(rebalance_dates)
+
+    idle_days = int((asset_returns.index < targets.index[0]).sum())
+    if idle_days:
+        logger.warning(
+            f"First signal is on {targets.index[0].date()}; the portfolio holds cash for "
+            f"the first {idle_days} trading days of the window. Load more history "
+            f"before start_date (simulation.warmup_days) if factors were not ready."
+        )
     
-    performance = pd.DataFrame({
-        "date": dates,
-        "portfolio_value": portfolio_values,
-        "returns": returns,
+    cost_rate = transaction_cost_bps / 10_000
+    returns_matrix = asset_returns.to_numpy()
+    held = np.zeros(returns_matrix.shape[1])  # weights carried into the day
+    
+    port_returns = np.zeros(len(asset_returns))
+    turnovers = np.zeros(len(asset_returns))
+    costs = np.zeros(len(asset_returns))
+    
+    for i, date in enumerate(asset_returns.index):
+        # 1. Weights set at the previous close earn today's returns
+        day_ret = returns_matrix[i]
+        gross = float(held @ day_ret)
+        if gross > -1.0:
+            held = held * (1.0 + day_ret) / (1.0 + gross)
+        else:
+            held = np.zeros_like(held)
+    
+        # 2. Trade to target at today's close; these weights earn tomorrow
+        cost = 0.0
+        if date in rebalance_set:
+            target = targets.loc[date].to_numpy()
+            turnovers[i] = float(np.abs(target - held).sum())
+            cost = turnovers[i] * cost_rate
+            held = target
+        costs[i] = cost
+        port_returns[i] = (1.0 + gross) * (1.0 - cost) - 1.0
+    
+    portfolio_value = capital_base * np.cumprod(1.0 + port_returns)
+    
+    logger.info(
+        f"Simulated {len(asset_returns)} days, {len(rebalance_dates)} rebalances "
+        f"({rebalance_frequency}), avg turnover {turnovers.sum() / len(rebalance_dates):.2%}, "
+        f"cost {transaction_cost_bps} bps"
+    )
+    
+    return pd.DataFrame({
+        "date": asset_returns.index,
+        "portfolio_value": portfolio_value,
+        "returns": port_returns,
+        "turnover": turnovers,
+        "transaction_cost": costs,
     })
-    
-    return performance
 
 
 def _log_params_to_mlflow(config: Dict[str, Any]) -> None:

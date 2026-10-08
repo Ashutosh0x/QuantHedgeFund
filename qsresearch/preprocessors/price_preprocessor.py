@@ -23,6 +23,9 @@ def preprocess_price_data(
     close_column: str = "close",
     volume_column: str = "volume",
     engine: str = "polars",
+    point_in_time: bool = True,
+    volume_lookback_days: int = 252,
+    universe_column: str = "in_universe",
 ) -> pd.DataFrame:
     """
     Preprocess price data for backtesting.
@@ -32,6 +35,19 @@ def preprocess_price_data(
     2. Remove large price gaps (corporate actions, errors)
     3. Remove low volume periods
     4. Forward fill missing prices
+    
+    With point_in_time=True (default, for backtests) every step only uses data
+    up to the row's own date:
+    - Insufficient history does not drop a symbol. Each row gets a boolean
+      `universe_column` that is True once the symbol has min_trading_days of
+      history up to that date (ANDed with any existing flag). Symbols that
+      never reach it are dropped. Strategies should only select flagged rows.
+    - Low volume is judged against the average of the previous
+      volume_lookback_days bars, not the whole sample.
+    With point_in_time=False the original whole-sample rules apply: symbols
+    with fewer than min_trading_days rows in total are dropped and volume is
+    compared to the full-sample average. Both use future data, which biases
+    backtests.
     
     Args:
         df: Raw price DataFrame
@@ -47,6 +63,10 @@ def preprocess_price_data(
         close_column: Name of close price column
         volume_column: Name of volume column
         engine: Processing engine
+        point_in_time: Use only past data in each step (see above)
+        volume_lookback_days: Point-in-time only: bars in the trailing
+            average that low volume is judged against
+        universe_column: Point-in-time only: eligibility column to write
         
     Returns:
         Cleaned DataFrame
@@ -66,7 +86,23 @@ def preprocess_price_data(
     df = df.sort_values([symbol_column, date_column])
     
     # 1. Remove symbols with insufficient trading days
-    if remove_low_trading_days:
+    if remove_low_trading_days and point_in_time:
+        # Trading days of history up to and including each row's date
+        history_days = df.groupby(symbol_column).cumcount() + 1
+        has_history = history_days >= min_trading_days
+        if universe_column in df.columns:
+            has_history &= df[universe_column].eq(True)
+        df[universe_column] = has_history
+        
+        ever_ready = df.groupby(symbol_column)[universe_column].transform("any")
+        df = df[ever_ready]
+        
+        removed = initial_symbols - df[symbol_column].nunique()
+        logger.info(
+            f"Flagged rows with < {min_trading_days} trading days of history; "
+            f"removed {removed} symbols that never reach it"
+        )
+    elif remove_low_trading_days:
         trading_days = df.groupby(symbol_column).size()
         valid_symbols = trading_days[trading_days >= min_trading_days].index
         df = df[df[symbol_column].isin(valid_symbols)]
@@ -92,8 +128,14 @@ def preprocess_price_data(
     
     # 3. Remove low volume periods
     if remove_low_volume:
-        # Calculate average volume per symbol
-        df["_avg_vol"] = df.groupby(symbol_column)[volume_column].transform("mean")
+        if point_in_time:
+            # Average volume of the previous volume_lookback_days bars only
+            df["_avg_vol"] = df.groupby(symbol_column)[volume_column].transform(
+                lambda v: v.shift(1).rolling(volume_lookback_days, min_periods=21).mean()
+            )
+        else:
+            # Calculate average volume per symbol
+            df["_avg_vol"] = df.groupby(symbol_column)[volume_column].transform("mean")
         
         # Remove days where volume is < 10% of average
         low_vol_mask = df[volume_column] < (df["_avg_vol"] * 0.1)
