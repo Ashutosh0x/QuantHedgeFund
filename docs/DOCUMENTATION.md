@@ -397,16 +397,16 @@ cleaned_data = preprocess_price_data(
 
 **What each step does:**
 
-1. **min_trading_days** - Ensures we have enough history for factor calculation
+1. **min_trading_days** - Ensures we have enough history for factor calculation. Counted point-in-time: a row is flagged `in_universe=False` until its symbol has `min_trading_days` rows up to that date, so the rows stay available for factor warm-up but can't be traded early
 2. **remove_low_trading_days** - Eliminates stocks with too many missing days
 3. **remove_large_gaps** - Removes data errors (e.g., 1000% daily moves)
-4. **remove_low_volume** - Removes stocks we couldn't actually trade
+4. **remove_low_volume** - Removes days with volume below 10% of the symbol's average volume up to that day (days we couldn't actually trade)
 
 **Universe Screener:**
 ```python
 from qsresearch.preprocessors import universe_screener
 
-filtered_data = universe_screener(
+screened_data = universe_screener(
  cleaned_data,
  lookback_days=730, # 2 year lookback
  volume_top_n=500, # Top 500 by volume
@@ -415,6 +415,8 @@ filtered_data = universe_screener(
  max_volatility=0.25, # Less than 25% annual volatility
 )
 ```
+
+The screener is point-in-time: it keeps every row and adds an `in_universe` flag that is True when the symbol passes all filters on that date, judged only on the trailing `lookback_days * 1.5` calendar days up to that date. `use_factor_as_signal` ranks only rows where `in_universe` is True, so a backtest never trades a symbol before it qualified, and still trades one that stopped qualifying later. `run_backtest` loads enough history before `start_date` to cover the screener's window.
 
 **Why we screen:**
 - We can only trade liquid stocks
@@ -1055,8 +1057,12 @@ sweep_config = {
 }
 
 # This tests 3 × 3 × 4 = 36 combinations
-results = run_iterative_sweep(sweep_config)
+sweep = run_iterative_sweep(sweep_config)
 ```
+
+Picking the combination with the best full-sample Sharpe is in-sample selection: with 36 tries, one will look good by luck. The sweep therefore selects walk-forward. Each test window (default 126 trading days) holds the combination with the best Sharpe over the training window before it (default 504 days, `sweep_config["walk_forward"]`), and switching combinations costs 2x the trading cost. `sweep["walk_forward"]["oos_sharpe"]` is the out-of-sample Sharpe of those choices joined together, the figure to judge the strategy by. `sweep["selected_params"]` is the choice on the most recent training window.
+
+**Delistings:** a symbol that stops trading before the data ends takes `simulation.delisting_return` (default -30%) on the day after its last trade, and the rest of the position moves to cash. The data has no delisting returns or reasons, so -30% is an assumption (the usual replacement for a performance-related delisting). It is conservative for takeovers and ticker changes.
 
 ### Multi-Factor Strategies
 

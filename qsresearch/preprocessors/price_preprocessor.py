@@ -9,9 +9,12 @@ import pandas as pd
 from loguru import logger
 
 
+DEFAULT_MIN_TRADING_DAYS = 504
+
+
 def preprocess_price_data(
     df: pd.DataFrame,
-    min_trading_days: int = 504,
+    min_trading_days: int = DEFAULT_MIN_TRADING_DAYS,
     remove_low_trading_days: bool = True,
     remove_large_gaps: bool = True,
     remove_low_volume: bool = True,
@@ -23,22 +26,28 @@ def preprocess_price_data(
     close_column: str = "close",
     volume_column: str = "volume",
     engine: str = "polars",
+    universe_column: str = "in_universe",
 ) -> pd.DataFrame:
     """
     Preprocess price data for backtesting.
     
     Performs the following cleaning steps:
-    1. Remove symbols with insufficient trading history
+    1. Flag rows where the symbol does not yet have enough trading history
     2. Remove large price gaps (corporate actions, errors)
-    3. Remove low volume periods
+    3. Remove low volume periods (vs. the symbol's average volume to date)
     4. Forward fill missing prices
     
     Args:
         df: Raw price DataFrame
         min_trading_days: Minimum required trading days (default: 504 = 2 years)
-        remove_low_trading_days: Filter symbols with insufficient history
+        remove_low_trading_days: Filter rows whose symbol has fewer than
+            min_trading_days rows up to and including that date. The rows are
+            kept (factors need the history) and flagged False in
+            universe_column; symbols that never reach min_trading_days in the
+            data are dropped, since none of their rows could be traded.
         remove_large_gaps: Remove suspicious price jumps
-        remove_low_volume: Filter out low volume periods
+        remove_low_volume: Remove days with volume below 10% of the symbol's
+            average volume up to and including that day
         symbol_column: Name of symbol column
         date_column: Name of date column
         open_column: Name of open price column
@@ -47,6 +56,8 @@ def preprocess_price_data(
         close_column: Name of close price column
         volume_column: Name of volume column
         engine: Processing engine
+        universe_column: Boolean eligibility column to add (ANDed with an
+            existing one); universe_screener narrows it further
         
     Returns:
         Cleaned DataFrame
@@ -65,14 +76,25 @@ def preprocess_price_data(
     # Sort by symbol and date
     df = df.sort_values([symbol_column, date_column])
     
-    # 1. Remove symbols with insufficient trading days
+    # 1. Flag rows before each symbol has min_trading_days of history, counting
+    # only rows up to and including that date (the total over the whole sample
+    # would let future data decide which symbols are tradable early on)
     if remove_low_trading_days:
-        trading_days = df.groupby(symbol_column).size()
-        valid_symbols = trading_days[trading_days >= min_trading_days].index
-        df = df[df[symbol_column].isin(valid_symbols)]
+        history_days = df.groupby(symbol_column).cumcount().to_numpy() + 1
+        has_history = history_days >= min_trading_days
+        if universe_column in df.columns:
+            has_history &= df[universe_column].eq(True).to_numpy()
+        df[universe_column] = has_history
+        
+        ever_valid = df.loc[df[universe_column], symbol_column].unique()
+        df = df[df[symbol_column].isin(ever_valid)]
         
         removed = initial_symbols - df[symbol_column].nunique()
-        logger.info(f"Removed {removed} symbols with < {min_trading_days} trading days")
+        young = (~df[universe_column]).sum()
+        logger.info(
+            f"Removed {removed} symbols that never reach {min_trading_days} trading days; "
+            f"flagged {young} rows before their symbol reaches it"
+        )
     
     # 2. Remove large price gaps
     if remove_large_gaps:
@@ -92,8 +114,15 @@ def preprocess_price_data(
     
     # 3. Remove low volume periods
     if remove_low_volume:
-        # Calculate average volume per symbol
-        df["_avg_vol"] = df.groupby(symbol_column)[volume_column].transform("mean")
+        # Average volume per symbol up to and including each day; a whole-sample
+        # average would let later volume decide which earlier days are dropped.
+        # df is sorted by symbol, so the grouped result lines up by position.
+        df["_avg_vol"] = (
+            df.groupby(symbol_column, sort=False, dropna=False)[volume_column]
+            .expanding()
+            .mean()
+            .to_numpy()
+        )
         
         # Remove days where volume is < 10% of average
         low_vol_mask = df[volume_column] < (df["_avg_vol"] * 0.1)

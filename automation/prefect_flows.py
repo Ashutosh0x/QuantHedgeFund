@@ -109,27 +109,36 @@ def run_parameter_sweep(
     """
     Run parameter sweep for strategy optimization.
     
-    Tests multiple combinations of strategy parameters.
+    Tests multiple combinations of strategy parameters and selects one
+    walk-forward; the reported Sharpe is the out-of-sample one.
     """
     logger = get_run_logger()
     logger.info(f"Running parameter sweep with {len(sweep_config.get('combinations', []))} combinations")
     
     from qsresearch.backtest.parameter_sweep import run_iterative_sweep
     
-    results = run_iterative_sweep(
+    sweep = run_iterative_sweep(
         sweep_config=sweep_config,
         run_date=run_date,
     )
+    walk_forward = sweep["walk_forward"]
     
-    best_result = max(results, key=lambda x: x.get("sharpe_ratio", 0))
-    
-    logger.info(f"Best combination: Sharpe {best_result.get('sharpe_ratio', 0):.4f}")
+    # The best full-sample Sharpe is in-sample and optimistic; report the
+    # walk-forward (out-of-sample) result instead
+    if walk_forward is None:
+        logger.warning("Walk-forward selection did not run; no parameters selected")
+    else:
+        logger.info(
+            f"Selected {sweep['selected_params']}: out-of-sample Sharpe "
+            f"{walk_forward['oos_sharpe']:.4f} (best in-sample {walk_forward['in_sample_best_sharpe']:.4f})"
+        )
     
     return {
         "run_date": run_date.isoformat(),
-        "combinations_tested": len(results),
-        "best_sharpe": best_result.get("sharpe_ratio", 0),
-        "best_params": best_result.get("params", {}),
+        "combinations_tested": len(sweep["combinations"]),
+        "oos_sharpe": walk_forward["oos_sharpe"] if walk_forward else None,
+        "in_sample_best_sharpe": walk_forward["in_sample_best_sharpe"] if walk_forward else None,
+        "selected_params": sweep["selected_params"],
     }
 
 

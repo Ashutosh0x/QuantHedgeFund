@@ -5,6 +5,7 @@ Central engine for calculating and managing quantitative factors.
 """
 
 from typing import Dict, List, Callable, Any, Optional
+import numpy as np
 import pandas as pd
 import polars as pl
 from loguru import logger
@@ -108,15 +109,21 @@ class FactorEngine:
         factor_columns: List[str],
         weights: Optional[List[float]] = None,
         output_column: str = "composite_factor",
+        date_column: str = "date",
     ) -> pd.DataFrame:
         """
         Create a composite factor from multiple factor columns.
+        
+        Each factor is z-scored across symbols within each date, so a row's
+        composite uses only values from its own date.
         
         Args:
             df: DataFrame with factor columns
             factor_columns: List of column names to combine
             weights: Optional weights for each factor (equal weight if None)
             output_column: Name of the output column
+            date_column: Date column to z-score within (a frame without it
+                is treated as a single cross-section)
             
         Returns:
             DataFrame with composite factor added
@@ -129,11 +136,17 @@ class FactorEngine:
         if len(weights) != len(factor_columns):
             raise ValueError("Number of weights must match number of factors")
         
-        # Normalize each factor to z-scores
-        normalized = pd.DataFrame()
+        # Normalize each factor to cross-sectional z-scores per date; a z-score
+        # over the whole frame would scale past values with future data
+        if date_column in df.columns:
+            by_date = df.groupby(date_column)
+        else:
+            by_date = df.groupby(np.zeros(len(df)))
+        normalized = pd.DataFrame(index=df.index)
         for col in factor_columns:
-            mean = df[col].mean()
-            std = df[col].std()
+            mean = by_date[col].transform("mean")
+            # A date with one symbol has no spread; its z-score is 0
+            std = by_date[col].transform("std").fillna(0.0)
             normalized[col] = (df[col] - mean) / (std + 1e-6)
         
         # Calculate weighted average

@@ -670,14 +670,18 @@ sweep_config = {
  }
 }
 
-results = run_iterative_sweep(
+sweep = run_iterative_sweep(
  sweep_config=sweep_config,
  experiment_name="Momentum_Factor_Iterative_Sweep"
 )
 
-# Find best combination
-best = max(results, key=lambda x: x["sharpe_ratio"])
-print(f"Best params: {best['params']}")
+# Parameters are chosen walk-forward: each 6-month test window holds the
+# combination with the best Sharpe over the 2 years before it. Judge the
+# strategy by the out-of-sample Sharpe; the best full-sample Sharpe is
+# in-sample and optimistic.
+wf = sweep["walk_forward"]
+print(f"Out-of-sample Sharpe: {wf['oos_sharpe']:.2f} (best in-sample {wf['in_sample_best_sharpe']:.2f})")
+print(f"Params to trade now: {sweep['selected_params']}")
 ```
 
 ### Omega (Execution Layer)
@@ -863,7 +867,7 @@ class Client:
 
 ```python
 def run_backtest(config: Dict, output_dir=None, log_to_mlflow=True) -> Dict
-def run_iterative_sweep(sweep_config: Dict, run_date=None, experiment_name=None) -> List
+def run_iterative_sweep(sweep_config: Dict, run_date=None, experiment_name=None) -> Dict  # combinations, walk_forward, selected_params
 def add_qsmom_features(df, fast_period=21, slow_period=252, signal_period=126) -> pd.DataFrame
 def calculate_all_metrics(performance: pd.DataFrame, benchmark=None) -> Dict[str, float]
 ```

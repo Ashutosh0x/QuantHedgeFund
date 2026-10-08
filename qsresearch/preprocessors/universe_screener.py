@@ -2,17 +2,42 @@
 QS Research - Universe Screener
 
 Filters the investment universe based on liquidity, volatility, and other criteria.
+
+Membership is point-in-time: each row is flagged using only that symbol's data up
+to and including the row's date, so a backtest never trades a universe chosen
+with knowledge of the future.
 """
 
+import math
 from typing import Optional, List
 import pandas as pd
 import numpy as np
 from loguru import logger
 
 
+DEFAULT_LOOKBACK_DAYS = 730
+LOOKBACK_CALENDAR_BUFFER = 1.5  # lookback_days * 1.5 calendar days, buffer for weekends
+TRADING_DAYS_PER_YEAR = 252
+CALENDAR_DAYS_PER_YEAR = 365
+
+
+def lookback_trading_days(lookback_days: Optional[int]) -> int:
+    """
+    Trading days of history the screener's trailing window spans.
+    
+    The window is lookback_days * 1.5 calendar days, converted at 252 trading
+    days per 365 calendar days. A falsy lookback_days screens on all history
+    (expanding window), which no finite warm-up can cover, so it returns 0.
+    """
+    if not lookback_days:
+        return 0
+    calendar_days = lookback_days * LOOKBACK_CALENDAR_BUFFER
+    return math.ceil(calendar_days * TRADING_DAYS_PER_YEAR / CALENDAR_DAYS_PER_YEAR)
+
+
 def universe_screener(
     df: pd.DataFrame,
-    lookback_days: int = 730,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     volume_top_n: Optional[int] = 500,
     momentum_top_n: Optional[int] = None,
     percent_change_filter: bool = False,
@@ -26,9 +51,10 @@ def universe_screener(
     date_column: str = "date",
     close_column: str = "close",
     volume_column: str = "volume",
+    universe_column: str = "in_universe",
 ) -> pd.DataFrame:
     """
-    Screen the investment universe based on multiple criteria.
+    Screen the investment universe based on multiple criteria, point-in-time.
     
     This screener helps avoid:
     - Illiquid stocks that are hard to trade
@@ -36,13 +62,23 @@ def universe_screener(
     - Highly volatile stocks that add noise
     - Stocks with suspicious price movements
     
+    No rows are dropped. Each row gets a boolean `universe_column` that is True
+    when the symbol passes every filter on that date, using metrics over the
+    trailing window (date - lookback_days * 1.5 calendar days, inclusive, up to
+    and including the date). An existing universe_column (e.g. the history flag
+    from preprocess_price_data) is ANDed in first. volume_top_n ranks the
+    symbols that pass the other filters by trailing average volume across each
+    date. Signal generators such as use_factor_as_signal rank only the rows
+    where the flag is True.
+    
     Args:
         df: Price DataFrame
-        lookback_days: Period for calculating metrics
-        volume_top_n: Keep only top N by average volume
-        momentum_top_n: Keep only top N by momentum
-        percent_change_filter: Filter extreme daily changes
-        max_percent_change: Maximum allowed daily change
+        lookback_days: Period for calculating metrics (trailing window of
+            lookback_days * 1.5 calendar days; falsy uses all history to date)
+        volume_top_n: Keep only top N by average volume on each date
+        momentum_top_n: Accepted for config compatibility; not applied
+        percent_change_filter: Accepted for config compatibility; not applied
+        max_percent_change: Accepted for config compatibility; not applied
         volatility_filter: Filter high volatility stocks
         max_volatility: Maximum allowed annualized volatility
         min_avg_volume: Minimum average daily volume
@@ -52,83 +88,95 @@ def universe_screener(
         date_column: Name of date column
         close_column: Name of close price column
         volume_column: Name of volume column
-        
+        universe_column: Name of the eligibility column to add (ANDed with
+            an existing column of that name)
+    
     Returns:
-        Filtered DataFrame
+        The input rows with an added boolean universe_column
     """
     initial_symbols = df[symbol_column].nunique()
-    logger.info(f"Screening universe from {initial_symbols} symbols")
+    logger.info(f"Screening universe from {initial_symbols} symbols (point-in-time)")
     
     df = df.copy()
     
-    # Get latest lookback_days of data
-    if lookback_days:
-        max_date = df[date_column].max()
-        min_date = max_date - pd.Timedelta(days=lookback_days * 1.5)  # Buffer for weekends
-        df = df[df[date_column] >= min_date]
+    # Rows already excluded upstream stay excluded
+    if universe_column in df.columns:
+        prior = df[universe_column].eq(True).to_numpy()
+    else:
+        prior = np.ones(len(df), dtype=bool)
     
-    # Calculate screening metrics per symbol
-    metrics = df.groupby(symbol_column).agg({
-        close_column: ["mean", "std", "last"],
-        volume_column: "mean",
+    # Work on a (symbol, date)-sorted copy; results go back by position
+    work = pd.DataFrame({
+        "symbol": df[symbol_column].to_numpy(),
+        "date": pd.to_datetime(df[date_column]).to_numpy(),
+        "close": df[close_column].to_numpy(dtype=float),
+        "volume": df[volume_column].to_numpy(dtype=float),
+        "prior": prior,
+        "row": np.arange(len(df)),
     })
-    metrics.columns = ["avg_price", "price_std", "last_price", "avg_volume"]
+    work = work.sort_values(["symbol", "date", "row"], kind="mergesort").reset_index(drop=True)
+    
+    closes = work.groupby("symbol", sort=False)["close"]
+    # Same as the window's last non-null close, i.e. the last traded price
+    work["last_price"] = closes.ffill()
+    work["daily_return"] = closes.pct_change(fill_method=None)
+    
+    # Calculate trailing screening metrics per symbol, as of each row's date
+    by_symbol = work.groupby("symbol", sort=False)
+    metric_columns = ["close", "volume", "daily_return"]
+    if lookback_days:
+        window = pd.Timedelta(days=lookback_days * LOOKBACK_CALENDAR_BUFFER)
+        trailing = by_symbol.rolling(window, on="date", closed="both")[metric_columns]
+    else:
+        trailing = by_symbol[metric_columns].expanding()
+    means = trailing.mean()
+    work["avg_price"] = means["close"].to_numpy()
+    work["avg_volume"] = means["volume"].to_numpy()
     
     # Calculate annualized volatility
-    returns = df.groupby(symbol_column)[close_column].pct_change()
-    volatility = df.groupby(symbol_column).apply(
-        lambda x: x[close_column].pct_change().std() * np.sqrt(252)
-    )
-    metrics["volatility"] = volatility
+    work["volatility"] = trailing.std()["daily_return"].to_numpy() * np.sqrt(252)
     
-    # Apply filters
-    valid_symbols = metrics.index.tolist()
+    # Apply filters; a NaN metric fails its filter
+    eligible = work["prior"].copy()
     
     # Minimum average volume
     if min_avg_volume:
-        vol_filter = metrics["avg_volume"] >= min_avg_volume
-        filtered_out = (~vol_filter).sum()
-        valid_symbols = metrics[vol_filter].index.tolist()
-        logger.debug(f"Volume filter removed {filtered_out} symbols")
+        eligible &= work["avg_volume"] >= min_avg_volume
     
     # Minimum average price
     if min_avg_price:
-        price_filter = metrics.loc[valid_symbols, "avg_price"] >= min_avg_price
-        filtered_out = (~price_filter).sum()
-        valid_symbols = [s for s, v in price_filter.items() if v]
-        logger.debug(f"Avg price filter removed {filtered_out} symbols")
+        eligible &= work["avg_price"] >= min_avg_price
     
     # Minimum last price
     if min_last_price:
-        last_filter = metrics.loc[valid_symbols, "last_price"] >= min_last_price
-        filtered_out = (~last_filter).sum()
-        valid_symbols = [s for s, v in last_filter.items() if v]
-        logger.debug(f"Last price filter removed {filtered_out} symbols")
+        eligible &= work["last_price"] >= min_last_price
     
     # Volatility filter
     if volatility_filter:
-        vol_filter = metrics.loc[valid_symbols, "volatility"] <= max_volatility
-        filtered_out = (~vol_filter).sum()
-        valid_symbols = [s for s, v in vol_filter.items() if v]
-        logger.debug(f"Volatility filter removed {filtered_out} symbols")
+        eligible &= work["volatility"] <= max_volatility
     
-    # Top N by volume
-    if volume_top_n and len(valid_symbols) > volume_top_n:
-        top_by_volume = (
-            metrics.loc[valid_symbols]
-            .nlargest(volume_top_n, "avg_volume")
-            .index.tolist()
+    # Top N by volume among the symbols passing the filters on each date;
+    # ties go to the earlier symbol, as nlargest did
+    if volume_top_n:
+        volume_rank = (
+            work["avg_volume"]
+            .where(eligible)
+            .groupby(work["date"])
+            .rank(method="first", ascending=False)
         )
-        valid_symbols = top_by_volume
-        logger.debug(f"Volume top_n reduced to {volume_top_n} symbols")
+        eligible &= volume_rank <= volume_top_n
     
-    # Filter DataFrame
-    df = df[df[symbol_column].isin(valid_symbols)]
+    flags = np.zeros(len(df), dtype=bool)
+    flags[work["row"].to_numpy()] = eligible.to_numpy()
+    df[universe_column] = flags
     
-    final_symbols = df[symbol_column].nunique()
+    latest = work["date"] == work["date"].max()
+    ever = work.loc[eligible, "symbol"].nunique()
+    daily = eligible.groupby(work["date"]).sum()
     logger.info(
-        f"Screened universe: {final_symbols} symbols "
-        f"({final_symbols/initial_symbols:.1%} retained)"
+        f"Screened universe: {daily.mean():.0f} eligible symbols per date on average, "
+        f"{int(eligible[latest].sum())} on the last date, {ever} of {initial_symbols} "
+        f"eligible at some point"
     )
     
     return df
